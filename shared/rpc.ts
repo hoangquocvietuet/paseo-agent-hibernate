@@ -88,8 +88,16 @@ export const forgetRpc = defineRpc({
   output: z.object({}),
 });
 
+/**
+ * One page of saved chat, oldest first within the page. Pages walk backwards: pass the previous
+ * page's `start` as `before` to get the messages above it; `start` 0 means nothing older is saved.
+ */
 export const historyRpc = defineRpc({
   name: "hibernate.history",
-  input: z.object({ agentId: z.string().min(1) }),
-  output: AgentHistorySchema,
+  input: z.object({
+    agentId: z.string().min(1),
+    before: z.number().int().nonnegative().optional(),
+    limit: z.number().int().min(1).max(100).default(30),
+  }),
+  output: AgentHistorySchema.extend({ start: z.number().int().nonnegative() }),
 });

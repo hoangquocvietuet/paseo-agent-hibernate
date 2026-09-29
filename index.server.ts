@@ -45,7 +45,12 @@ export default function contribute(server: PluginServerContext) {
     await registry.remove([agentId]);
     return {};
   });
-  server.handle(historyRpc, ({ agentId }, { paseo }) => hibernator.history(paseo, agentId));
+  server.handle(historyRpc, async ({ agentId, before, limit }, { paseo }) => {
+    const history = await hibernator.history(paseo, agentId);
+    const end = Math.min(before ?? history.items.length, history.items.length);
+    const start = Math.max(0, end - limit);
+    return { ...history, start, items: history.items.slice(start, end) };
+  });
 
   const scanTimer = setInterval(() => {
     hibernator.scanIfEnabled().catch((error) => console.error("Hibernate scan failed", error));
