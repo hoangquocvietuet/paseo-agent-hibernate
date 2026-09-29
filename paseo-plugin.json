@@ -1,0 +1,7 @@
+{
+  "id": "agent-hibernate",
+  "description": "Archive agents that sit idle too long to free their sessions, then list and resume them from one dashboard.",
+  "requirements": {
+    "paseo": ">=0.10.1"
+  }
+}
