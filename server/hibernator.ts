@@ -116,14 +116,14 @@ export class Hibernator {
   async hibernateAgent(api: PaseoApi, agentId: string): Promise<HibernatedAgent> {
     this.attach(api);
     const agent = await fetchAgent(api, agentId);
-    if (!agent) throw new Error(`Không tìm thấy agent ${agentId}.`);
+    if (!agent) throw new Error(`Agent not found: ${agentId}`);
     if (parentAgentId(agent)) {
-      throw new Error("Đây là sub-agent: nó sẽ được archive cùng main agent.");
+      throw new Error("This is a sub-agent; it is archived together with its main agent.");
     }
-    if (agent.archivedAt) throw new Error("Agent đã được archive.");
+    if (agent.archivedAt) throw new Error("The agent is already archived.");
     const descendants = await listDescendants(api, agent.id);
     if ([agent, ...descendants].some(isBusy)) {
-      throw new Error("Agent hoặc sub-agent của nó đang chạy hay chờ duyệt quyền.");
+      throw new Error("The agent or one of its sub-agents is running or waiting for a permission.");
     }
     const entry = await this.archive(api, agent, await lastActivityMs(api, agent), "manual");
     await this.archiveUnusedWorkspaces(api);
@@ -139,7 +139,7 @@ export class Hibernator {
   async resume(api: PaseoApi, agentId: string, prompt: string): Promise<ResumeResult> {
     this.attach(api);
     const agent = await fetchAgent(api, agentId);
-    if (!agent) throw new Error(`Không tìm thấy agent ${agentId}.`);
+    if (!agent) throw new Error(`Agent not found: ${agentId}`);
     const workspaceId = agent.workspaceId ?? null;
     if (workspaceId) {
       const workspaces = await listActiveWorkspaces(api);
@@ -192,7 +192,7 @@ export class Hibernator {
     const stored = await this.registry.readHistory(agentId);
     if (stored) return stored;
     const agent = await fetchAgent(api, agentId);
-    if (!agent) throw new Error(`Không tìm thấy agent ${agentId}.`);
+    if (!agent) throw new Error(`Agent not found: ${agentId}`);
     try {
       const history = await captureHistory(api, agentId);
       await this.registry.putHistory(agentId, history);

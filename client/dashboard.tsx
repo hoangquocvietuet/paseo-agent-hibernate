@@ -12,11 +12,12 @@ import {
   type HibernatedAgentView,
 } from "../shared/rpc";
 import { formatAgo } from "./format";
-import { HistoryModal } from "./history-modal";
+import { HistoryView } from "./history-view";
 
-const DEFAULT_RESUME_PROMPT = "Tiếp tục";
+const DEFAULT_RESUME_PROMPT = "Continue";
 
 type Theme = PluginSurfaceProps["theme"];
+type RowNavigation = { openAgent(): void; openWorkspace(workspaceId: string): void } | null;
 
 function createStyles(theme: Theme, compact: boolean) {
   const button = {
@@ -74,19 +75,26 @@ export function HibernateDashboard({ theme, layout, host, navigation, openSettin
   const listKey = ["agent-hibernate", "list", host.id];
   const list = useRpc(listRpc);
   const scan = useRpc(scanRpc);
+  const [viewing, setViewing] = useState<HibernatedAgentView | null>(null);
 
   const query = useQuery({ queryKey: listKey, queryFn: () => list({}), refetchInterval: 30_000 });
   const scanMutation = useMutation({
     mutationFn: () => scan({}),
     onSuccess: ({ hibernated }) => {
       toast.show(
-        hibernated.length > 0 ? `Đã cho ${hibernated.length} agent ngủ đông` : "Không có agent nào đủ lâu",
+        hibernated.length > 0 ? `Hibernated ${hibernated.length} agent(s)` : "No agent idle long enough",
         { variant: hibernated.length > 0 ? "success" : "info" },
       );
       return queryClient.invalidateQueries({ queryKey: listKey });
     },
     onError: (error) => toast.error(String(error)),
   });
+
+  if (viewing) {
+    return (
+      <HistoryView entry={viewing} theme={theme} compact={layout.compact} onBack={() => setViewing(null)} />
+    );
+  }
 
   const nowMs = query.dataUpdatedAt || Date.now();
   const data = query.data;
@@ -95,19 +103,19 @@ export function HibernateDashboard({ theme, layout, host, navigation, openSettin
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <View style={styles.header}>
         <View style={{ gap: 4, flexShrink: 1 }}>
-          <Text style={styles.title}>Agent đang ngủ đông</Text>
+          <Text style={styles.title}>Hibernated agents</Text>
           {data ? (
             <Text style={styles.muted}>
               {data.enabled
-                ? `Tự archive agent idle quá ${data.idleHours} giờ.`
-                : "Tự động quét đang tắt."}{" "}
-              {data.lastScanAt ? `Quét lần cuối ${formatAgo(data.lastScanAt, nowMs)}.` : ""}
+                ? `Agents idle for more than ${data.idleHours} h are archived automatically.`
+                : "Automatic scan is off."}{" "}
+              {data.lastScanAt ? `Last scan ${formatAgo(data.lastScanAt, nowMs)}.` : ""}
             </Text>
           ) : null}
         </View>
         <View style={styles.actions}>
           <Pressable accessibilityRole="button" style={styles.button} onPress={openSettings}>
-            <Text style={styles.buttonText}>Cài đặt</Text>
+            <Text style={styles.buttonText}>Settings</Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"
@@ -116,16 +124,16 @@ export function HibernateDashboard({ theme, layout, host, navigation, openSettin
             onPress={() => scanMutation.mutate()}
           >
             <Text style={styles.primaryButtonText}>
-              {scanMutation.isPending ? "Đang quét..." : "Quét ngay"}
+              {scanMutation.isPending ? "Scanning..." : "Scan now"}
             </Text>
           </Pressable>
         </View>
       </View>
 
       {query.isError ? <Text style={styles.danger}>{String(query.error)}</Text> : null}
-      {query.isPending ? <Text style={styles.muted}>Đang tải...</Text> : null}
+      {query.isPending ? <Text style={styles.muted}>Loading...</Text> : null}
       {data && data.entries.length === 0 ? (
-        <Text style={styles.muted}>Chưa có agent nào đang ngủ đông.</Text>
+        <Text style={styles.muted}>No hibernated agents.</Text>
       ) : null}
       {data?.entries.map((entry) => (
         <HibernatedRow
@@ -135,6 +143,7 @@ export function HibernateDashboard({ theme, layout, host, navigation, openSettin
           compact={layout.compact}
           nowMs={nowMs}
           listKey={listKey}
+          onOpenHistory={() => setViewing(entry)}
           navigation={
             navigation
               ? {
@@ -156,6 +165,7 @@ function HibernatedRow({
   compact,
   nowMs,
   listKey,
+  onOpenHistory,
   navigation,
 }: {
   entry: HibernatedAgentView;
@@ -163,7 +173,8 @@ function HibernatedRow({
   compact: boolean;
   nowMs: number;
   listKey: readonly unknown[];
-  navigation: { openAgent(): void; openWorkspace(workspaceId: string): void } | null;
+  onOpenHistory(): void;
+  navigation: RowNavigation;
 }) {
   const styles = useMemo(() => createStyles(theme, compact), [theme, compact]);
   const queryClient = useQueryClient();
@@ -172,7 +183,6 @@ function HibernatedRow({
   const cancelResume = useRpc(cancelResumeRpc);
   const forget = useRpc(forgetRpc);
   const [prompt, setPrompt] = useState<string | null>(null);
-  const [historyOpen, setHistoryOpen] = useState(false);
   const invalidate = () => queryClient.invalidateQueries({ queryKey: listKey });
 
   const resumeMutation = useMutation({
@@ -182,7 +192,7 @@ function HibernatedRow({
       if (result.status === "resumed") {
         navigation?.openAgent();
       } else {
-        toast.show("Bấm Unarchive/Restore để mở lại workspace; agent sẽ tự tiếp tục trong đó.", {
+        toast.show("Press Unarchive or Restore to reopen the workspace; the agent continues there.", {
           variant: "info",
           durationMs: 8000,
         });
@@ -203,13 +213,12 @@ function HibernatedRow({
     onError: (error) => toast.error(String(error)),
   });
 
-  const title = entry.title ?? "Agent chưa đặt tên";
   const workspaceLabel = entry.workspaceName ?? entry.workspaceId;
 
   return (
     <View style={styles.card}>
       <Text style={styles.rowTitle} numberOfLines={2}>
-        {title}
+        {entry.title ?? "Untitled agent"}
       </Text>
       <Text style={styles.muted} numberOfLines={1}>
         {entry.cwd}
@@ -218,27 +227,27 @@ function HibernatedRow({
         {entry.model ? `${entry.provider} · ${entry.model}` : entry.provider}
       </Text>
       <Text style={styles.muted}>
-        Hoạt động cuối {formatAgo(entry.lastActivityAt, nowMs)} · ngủ đông{" "}
+        Last active {formatAgo(entry.lastActivityAt, nowMs)} · hibernated{" "}
         {formatAgo(entry.hibernatedAt, nowMs)}
-        {entry.reason === "manual" ? " (thủ công)" : ""}
+        {entry.reason === "manual" ? " (manually)" : ""}
       </Text>
       {workspaceLabel ? (
         <Text style={styles.muted} numberOfLines={1}>
           Workspace: {workspaceLabel}
-          {entry.workspaceActive ? "" : " (đã đóng)"}
+          {entry.workspaceActive ? "" : " (closed)"}
         </Text>
       ) : null}
       {entry.subagentCount > 0 ? (
         <Text style={styles.muted}>
-          Kèm {entry.subagentCount} sub-agent. Chúng mở lại khi main agent gửi prompt cho chúng.
+          With {entry.subagentCount} sub-agent(s). They reopen when the main agent prompts them.
         </Text>
       ) : null}
 
       {entry.pendingPrompt !== null ? (
         <View style={{ gap: 8, marginTop: 4 }}>
           <Text style={styles.warning}>
-            Đang chờ mở lại workspace. Bấm Unarchive/Restore ở màn workspace, agent sẽ tự nhận lời
-            nhắn “{entry.pendingPrompt}”.
+            Waiting for the workspace to reopen. Press Unarchive or Restore on the workspace screen
+            and the agent receives “{entry.pendingPrompt}”.
           </Text>
           <View style={styles.actions}>
             {navigation && entry.workspaceId ? (
@@ -247,7 +256,7 @@ function HibernatedRow({
                 style={styles.primaryButton}
                 onPress={() => navigation.openWorkspace(entry.workspaceId!)}
               >
-                <Text style={styles.primaryButtonText}>Mở workspace</Text>
+                <Text style={styles.primaryButtonText}>Open workspace</Text>
               </Pressable>
             ) : null}
             <Pressable
@@ -256,7 +265,7 @@ function HibernatedRow({
               disabled={cancelMutation.isPending}
               onPress={() => cancelMutation.mutate()}
             >
-              <Text style={styles.buttonText}>Hủy chờ</Text>
+              <Text style={styles.buttonText}>Stop waiting</Text>
             </Pressable>
           </View>
         </View>
@@ -264,14 +273,14 @@ function HibernatedRow({
         <View style={{ gap: 8, marginTop: 4 }}>
           {!entry.workspaceActive ? (
             <Text style={styles.muted}>
-              Workspace đã đóng: sau khi gửi, bấm Unarchive/Restore để mở lại nó.
+              The workspace is closed: after sending, press Unarchive or Restore to reopen it.
             </Text>
           ) : null}
           <TextInput
             style={styles.input}
             value={prompt}
             onChangeText={setPrompt}
-            placeholder="Lời nhắn gửi cho agent"
+            placeholder="Message for the agent"
             multiline
             autoFocus
           />
@@ -283,11 +292,11 @@ function HibernatedRow({
               onPress={() => resumeMutation.mutate(prompt)}
             >
               <Text style={styles.primaryButtonText}>
-                {resumeMutation.isPending ? "Đang đánh thức..." : "Gửi và mở"}
+                {resumeMutation.isPending ? "Waking up..." : "Send and open"}
               </Text>
             </Pressable>
             <Pressable accessibilityRole="button" style={styles.button} onPress={() => setPrompt(null)}>
-              <Text style={styles.buttonText}>Hủy</Text>
+              <Text style={styles.buttonText}>Cancel</Text>
             </Pressable>
           </View>
         </View>
@@ -298,10 +307,10 @@ function HibernatedRow({
             style={styles.primaryButton}
             onPress={() => setPrompt(DEFAULT_RESUME_PROMPT)}
           >
-            <Text style={styles.primaryButtonText}>Tiếp tục</Text>
+            <Text style={styles.primaryButtonText}>Continue</Text>
           </Pressable>
-          <Pressable accessibilityRole="button" style={styles.button} onPress={() => setHistoryOpen(true)}>
-            <Text style={styles.buttonText}>Lịch sử</Text>
+          <Pressable accessibilityRole="button" style={styles.button} onPress={onOpenHistory}>
+            <Text style={styles.buttonText}>View chat</Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"
@@ -309,19 +318,10 @@ function HibernatedRow({
             disabled={forgetMutation.isPending}
             onPress={() => forgetMutation.mutate()}
           >
-            <Text style={styles.buttonText}>Bỏ khỏi danh sách</Text>
+            <Text style={styles.buttonText}>Remove from list</Text>
           </Pressable>
         </View>
       )}
-      {historyOpen ? (
-        <HistoryModal
-          agentId={entry.agentId}
-          title={title}
-          theme={theme}
-          open={historyOpen}
-          onOpenChange={setHistoryOpen}
-        />
-      ) : null}
     </View>
   );
 }

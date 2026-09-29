@@ -12,19 +12,19 @@ export default function contribute(client: PluginClientContext) {
   client.addSurface("hibernate", Dashboard);
   client.addSidebarItem({
     id: "hibernate",
-    title: "Agent ngủ đông",
+    title: "Hibernated agents",
     icon: "Moon",
     surface: "hibernate",
   });
   client.addSettingsScreen({
     id: "hibernate",
-    title: "Ngủ đông agent",
+    title: "Agent hibernation",
     icon: "Moon",
     Component: HibernateSettingsScreen,
   });
   client.addCommandCenterItem({
     id: "open-hibernated",
-    title: "Mở danh sách agent ngủ đông",
+    title: "Open hibernated agents",
     icon: "Moon",
     keywords: ["hibernate", "sleep", "archive", "idle"],
     context: "global",
@@ -34,7 +34,7 @@ export default function contribute(client: PluginClientContext) {
   });
   client.addCommandCenterItem({
     id: "hibernate-agent",
-    title: "Cho agent này ngủ đông",
+    title: "Hibernate this agent",
     icon: "Moon",
     keywords: ["hibernate", "sleep", "archive", "free memory"],
     context: "agent",

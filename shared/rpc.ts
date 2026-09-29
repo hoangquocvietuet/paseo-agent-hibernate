@@ -30,7 +30,7 @@ export type HibernatedAgentView = z.infer<typeof HibernatedAgentViewSchema>;
 
 export const HistoryItemSchema = z.object({
   timestamp: z.string(),
-  kind: z.enum(["user", "assistant", "reasoning", "tool", "error"]),
+  kind: z.enum(["user", "assistant"]),
   text: z.string(),
 });
 export type HistoryItem = z.infer<typeof HistoryItemSchema>;

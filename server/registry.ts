@@ -65,9 +65,12 @@ export class HibernationRegistry {
     await writeAtomic(this.historyPath(agentId), JSON.stringify(history));
   }
 
+  /** `null` when missing or stored in an older shape; callers capture it again. */
   async readHistory(agentId: string): Promise<AgentHistory | null> {
     const raw = await readOptional(this.historyPath(agentId));
-    return raw === null ? null : AgentHistorySchema.parse(JSON.parse(raw));
+    if (raw === null) return null;
+    const parsed = AgentHistorySchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
   }
 
   private historyPath(agentId: string): string {

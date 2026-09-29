@@ -15,7 +15,7 @@ type ReadySettings = Extract<SettingsState<typeof hibernateSettings.schema>, { s
 export function HibernateSettingsScreen({ theme }: PluginSurfaceProps) {
   const settings = useSettings(hibernateSettings);
   if (settings.status === "loading") {
-    return <Text style={{ color: theme.colors.foregroundMuted }}>Đang tải...</Text>;
+    return <Text style={{ color: theme.colors.foregroundMuted }}>Loading...</Text>;
   }
   if (settings.status !== "ready") {
     return <Text style={{ color: theme.colors.statusDanger }}>{settings.error}</Text>;
@@ -27,14 +27,14 @@ export function HibernateSettingsScreen({ theme }: PluginSurfaceProps) {
 function HibernateControls({ settings }: { settings: ReadySettings }) {
   const [hoursDraft, setHoursDraft] = useState(String(settings.values.idleHours));
   const hours = Number(hoursDraft.replace(",", "."));
-  const hoursError = Number.isFinite(hours) && hours > 0 ? null : "Nhập số giờ lớn hơn 0";
+  const hoursError = Number.isFinite(hours) && hours > 0 ? null : "Enter a number of hours above 0";
 
   return (
-    <SettingsSection title="Ngủ đông agent">
+    <SettingsSection title="Agent hibernation">
       <SettingsCard>
         <SettingsSwitch
-          label="Tự động quét"
-          hint="Mỗi 10 phút, archive các agent idle quá ngưỡng. Nút Quét ngay vẫn chạy khi tắt."
+          label="Automatic scan"
+          hint="Every 10 minutes, archive agents idle past the threshold. Scan now still works when this is off."
           value={settings.values.enabled}
           disabled={settings.saving}
           onValueChange={(enabled) =>
@@ -42,16 +42,16 @@ function HibernateControls({ settings }: { settings: ReadySettings }) {
           }
         />
         <SettingsInput
-          label="Ngưỡng idle (giờ)"
-          hint="Agent không có hoạt động lâu hơn ngưỡng này sẽ bị archive."
+          label="Idle threshold (hours)"
+          hint="Agents with no conversation activity for longer than this are archived."
           initialValue={hoursDraft}
           onChangeText={setHoursDraft}
           error={hoursError}
           disabled={settings.saving}
         />
         <SettingsAction
-          label="Lưu ngưỡng"
-          actionLabel={settings.saving ? "Đang lưu..." : "Lưu"}
+          label="Save threshold"
+          actionLabel={settings.saving ? "Saving..." : "Save"}
           disabled={settings.saving || hoursError !== null || hours === settings.values.idleHours}
           error={settings.saveError}
           onPress={() => void settings.save({ ...settings.values, idleHours: hours }, settings.revision)}
