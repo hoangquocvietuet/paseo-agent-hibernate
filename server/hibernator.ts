@@ -1,7 +1,9 @@
 import type { PluginHandlerContext, PluginSettings } from "@getpaseo/plugin/server";
-import type { HibernatedAgent } from "../shared/rpc";
+import type { AgentHistory, HibernatedAgent } from "../shared/rpc";
 import { hibernateSettings } from "../shared/settings";
+import { captureHistory } from "./history";
 import type { HibernationRegistry } from "./registry";
+import { archiveWorkspaceIfUnused, listActiveWorkspaces } from "./workspaces";
 
 type PaseoApi = PluginHandlerContext["paseo"];
 
@@ -49,10 +51,15 @@ const PARENT_AGENT_ID_LABEL = "paseo.parent-agent-id";
 const CONVERSATION_ITEM_TYPES = new Set(["user_message", "assistant_message", "reasoning", "tool_call"]);
 const TIMELINE_TAIL_LIMIT = 50;
 
+export type ResumeResult =
+  | { status: "resumed"; agentId: string }
+  | { status: "restore_workspace"; agentId: string; workspaceId: string };
+
 export class Hibernator {
   private api: PaseoApi | null = null;
   private lastScanAt: string | null = null;
   private scanning: Promise<string[]> | null = null;
+  private resumingPending = false;
 
   constructor(
     private readonly settings: PluginSettings<typeof hibernateSettings.schema>,
@@ -85,11 +92,21 @@ export class Hibernator {
 
   async list(api: PaseoApi) {
     this.attach(api);
-    const [config, entries] = await Promise.all([this.readConfig(), this.registry.list()]);
+    const [config, entries, workspaces] = await Promise.all([
+      this.readConfig(),
+      this.registry.list(),
+      listActiveWorkspaces(api),
+    ]);
     const stale = await this.findRestoredOrDeleted(api, entries);
     await this.registry.remove(stale);
+    const activeWorkspaceIds = new Set(workspaces.map((workspace) => workspace.id));
     return {
-      entries: entries.filter((entry) => !stale.includes(entry.agentId)),
+      entries: entries
+        .filter((entry) => !stale.includes(entry.agentId))
+        .map((entry) => ({
+          ...entry,
+          workspaceActive: entry.workspaceId === null || activeWorkspaceIds.has(entry.workspaceId),
+        })),
       lastScanAt: this.lastScanAt,
       enabled: config.enabled,
       idleHours: config.idleHours,
@@ -108,15 +125,81 @@ export class Hibernator {
     if ([agent, ...descendants].some(isBusy)) {
       throw new Error("Agent hoặc sub-agent của nó đang chạy hay chờ duyệt quyền.");
     }
-    return this.archive(api, agent, await lastActivityMs(api, agent), "manual");
+    const entry = await this.archive(api, agent, await lastActivityMs(api, agent), "manual");
+    await this.archiveUnusedWorkspaces(api);
+    return (await this.registry.get(agent.id)) ?? entry;
   }
 
-  async resume(api: PaseoApi, agentId: string, prompt: string): Promise<void> {
+  /**
+   * The daemon unarchives and resumes an archived agent when it receives a prompt, but leaves
+   * its workspace archived. The plugin API cannot restore a workspace (only the app's recovery
+   * view can), so the prompt waits until the user restores it there; `resumePending` sends it.
+   * Sub-agents stay archived until the main agent prompts them, which unarchives them too.
+   */
+  async resume(api: PaseoApi, agentId: string, prompt: string): Promise<ResumeResult> {
     this.attach(api);
-    // The daemon unarchives and resumes an archived agent when it receives a prompt. Its
-    // sub-agents stay archived until it prompts them, which unarchives them the same way.
+    const agent = await fetchAgent(api, agentId);
+    if (!agent) throw new Error(`Không tìm thấy agent ${agentId}.`);
+    const workspaceId = agent.workspaceId ?? null;
+    if (workspaceId) {
+      const workspaces = await listActiveWorkspaces(api);
+      if (!workspaces.some((workspace) => workspace.id === workspaceId)) {
+        await this.registry.update(agentId, { pendingPrompt: prompt });
+        return { status: "restore_workspace", agentId, workspaceId };
+      }
+    }
     await api.agents.ref(agentId).send(prompt);
     await this.registry.remove([agentId]);
+    return { status: "resumed", agentId };
+  }
+
+  cancelResume(agentId: string): Promise<void> {
+    return this.registry.update(agentId, { pendingPrompt: null });
+  }
+
+  /** Sends held prompts once their workspace is active again. Cheap when nothing is pending. */
+  async resumePending(): Promise<void> {
+    const api = this.api;
+    if (!api || this.resumingPending) return;
+    const pending = (await this.registry.list()).filter((entry) => entry.pendingPrompt);
+    if (pending.length === 0) return;
+    this.resumingPending = true;
+    try {
+      const activeWorkspaceIds = new Set((await listActiveWorkspaces(api)).map((w) => w.id));
+      for (const entry of pending) {
+        if (!entry.pendingPrompt || !entry.workspaceId || !activeWorkspaceIds.has(entry.workspaceId)) {
+          continue;
+        }
+        try {
+          await api.agents.ref(entry.agentId).send(entry.pendingPrompt);
+          await this.registry.remove([entry.agentId]);
+          console.log(`Resumed ${entry.agentId} after its workspace was restored`);
+        } catch (error) {
+          console.error(`Failed to resume ${entry.agentId}`, error);
+        }
+      }
+    } finally {
+      this.resumingPending = false;
+    }
+  }
+
+  /**
+   * Captured before archiving. Agents hibernated before capture existed are read once: that loads
+   * the archived agent for history, so archive it again right away to close the session.
+   */
+  async history(api: PaseoApi, agentId: string): Promise<AgentHistory> {
+    this.attach(api);
+    const stored = await this.registry.readHistory(agentId);
+    if (stored) return stored;
+    const agent = await fetchAgent(api, agentId);
+    if (!agent) throw new Error(`Không tìm thấy agent ${agentId}.`);
+    try {
+      const history = await captureHistory(api, agentId);
+      await this.registry.putHistory(agentId, history);
+      return history;
+    } finally {
+      if (agent.archivedAt) await api.agents.ref(agentId).archive();
+    }
   }
 
   private async runScan(api: PaseoApi): Promise<string[]> {
@@ -158,6 +241,7 @@ export class Hibernator {
       }
     }
     if (hibernated.length > 0) console.log(`Hibernated ${hibernated.length} agent(s)`, hibernated);
+    await this.archiveUnusedWorkspaces(api);
     return hibernated;
   }
 
@@ -167,6 +251,14 @@ export class Hibernator {
     lastActivity: number,
     reason: HibernatedAgent["reason"],
   ): Promise<HibernatedAgent> {
+    // Read while the session is still loaded: afterwards reading it would load it again.
+    const history = await captureHistory(api, agent.id).catch((error: unknown) => {
+      console.error(`Failed to capture history of ${agent.id}`, error);
+      return null;
+    });
+    const workspace = agent.workspaceId
+      ? (await listActiveWorkspaces(api)).find((candidate) => candidate.id === agent.workspaceId)
+      : undefined;
     // The daemon cascades this to sub-agents; the plugin never archives them itself.
     await api.agents.ref(agent.id).archive();
     const children = await listAgents(api, {
@@ -180,13 +272,48 @@ export class Hibernator {
       provider: agent.provider,
       model: agent.model,
       workspaceId: agent.workspaceId ?? null,
+      workspaceName: workspace?.name ?? null,
+      workspaceArchivedByPlugin: false,
       lastActivityAt: new Date(lastActivity).toISOString(),
       hibernatedAt: new Date().toISOString(),
       reason,
       subagentCount: children.filter((child) => child.archivedAt).length,
+      pendingPrompt: null,
     };
     await this.registry.put(entry);
+    if (history) await this.registry.putHistory(agent.id, history);
     return entry;
+  }
+
+  /**
+   * Workspaces of hibernated agents leave the sidebar once nothing else uses them. Runs after
+   * every scan, which also covers agents hibernated before this existed and workspaces whose
+   * last other agent was hibernated later. Workspaces with a held prompt are left alone.
+   */
+  private async archiveUnusedWorkspaces(api: PaseoApi): Promise<void> {
+    const entries = (await this.registry.list()).filter(
+      (entry) => entry.workspaceId && !entry.workspaceArchivedByPlugin && !entry.pendingPrompt,
+    );
+    if (entries.length === 0) return;
+    const [workspaces, agents] = await Promise.all([listActiveWorkspaces(api), listAgents(api, {})]);
+    const occupiedWorkspaceIds = new Set(agents.flatMap((agent) => agent.workspaceId ?? []));
+    for (const workspaceId of new Set(entries.map((entry) => entry.workspaceId))) {
+      const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
+      if (!workspace) continue;
+      try {
+        const keptBecause = await archiveWorkspaceIfUnused(api, workspace, occupiedWorkspaceIds);
+        if (keptBecause) continue;
+        console.log(`Archived unused workspace ${workspace.name} (${workspace.id})`);
+        for (const entry of entries.filter((candidate) => candidate.workspaceId === workspaceId)) {
+          await this.registry.update(entry.agentId, {
+            workspaceArchivedByPlugin: true,
+            workspaceName: workspace.name,
+          });
+        }
+      } catch (error) {
+        console.error(`Failed to archive workspace ${workspace.id}`, error);
+      }
+    }
   }
 
   /** Entries restored elsewhere (Unarchive button, a prompt from another client) or deleted. */

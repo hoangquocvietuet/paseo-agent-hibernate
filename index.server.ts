@@ -1,10 +1,20 @@
 import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { Hibernator } from "./server/hibernator";
 import { defaultRegistryPath, HibernationRegistry } from "./server/registry";
-import { forgetRpc, hibernateAgentRpc, listRpc, resumeRpc, scanRpc } from "./shared/rpc";
+import {
+  cancelResumeRpc,
+  forgetRpc,
+  hibernateAgentRpc,
+  historyRpc,
+  listRpc,
+  resumeRpc,
+  scanRpc,
+} from "./shared/rpc";
 import { hibernateSettings } from "./shared/settings";
 
 const SCAN_INTERVAL_MS = 10 * 60 * 1000;
+/** How quickly a held prompt follows the user restoring its workspace in the app. */
+const PENDING_RESUME_INTERVAL_MS = 3 * 1000;
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(hibernateSettings);
@@ -24,17 +34,27 @@ export default function contribute(server: PluginServerContext) {
   server.handle(hibernateAgentRpc, ({ agentId }, { paseo }) =>
     hibernator.hibernateAgent(paseo, agentId),
   );
-  server.handle(resumeRpc, async ({ agentId, prompt }, { paseo }) => {
-    await hibernator.resume(paseo, agentId, prompt);
-    return { agentId };
+  server.handle(resumeRpc, ({ agentId, prompt }, { paseo }) =>
+    hibernator.resume(paseo, agentId, prompt),
+  );
+  server.handle(cancelResumeRpc, async ({ agentId }) => {
+    await hibernator.cancelResume(agentId);
+    return {};
   });
   server.handle(forgetRpc, async ({ agentId }) => {
     await registry.remove([agentId]);
     return {};
   });
+  server.handle(historyRpc, ({ agentId }, { paseo }) => hibernator.history(paseo, agentId));
 
-  const timer = setInterval(() => {
+  const scanTimer = setInterval(() => {
     hibernator.scanIfEnabled().catch((error) => console.error("Hibernate scan failed", error));
   }, SCAN_INTERVAL_MS);
-  return () => clearInterval(timer);
+  const pendingTimer = setInterval(() => {
+    hibernator.resumePending().catch((error) => console.error("Pending resume failed", error));
+  }, PENDING_RESUME_INTERVAL_MS);
+  return () => {
+    clearInterval(scanTimer);
+    clearInterval(pendingTimer);
+  };
 }

@@ -11,14 +11,17 @@ Every 10 minutes the plugin archives main agents whose whole family (the agent a
 - A family is skipped while any member is running, has an active turn, or waits for a permission.
 - Idleness is measured from the newest conversation item (user message, assistant message, reasoning, tool call) in each family member's timeline. `updatedAt` is not used on its own: it also moves on title, label and mode changes and when a provider session reloads (for example `omp` emits `notification` and `todo` rows on load).
 - Opening an agent to read it does not count as activity.
+- After hibernating, the agent's workspace is archived too (so it leaves the sidebar) when nothing else uses it: no active agent, no terminal, not pinned. Archiving a Paseo-owned worktree deletes its directory (the branch stays), so those are archived only when `git status` is clean and HEAD is on a branch.
+- **Tiếp tục** with the workspace still active sends the prompt; the agent reappears in that workspace. When the workspace was archived, the plugin API cannot restore it, so the plugin holds the prompt and opens the workspace in the app, whose recovery view offers **Unarchive** (or **Restore branch** when the worktree directory is gone). As soon as the workspace is active again, the plugin sends the held prompt and the agent continues in its original workspace.
+- The chat history (last 400 conversation items) is captured before archiving and shown by **Lịch sử** in the dashboard. Reading an archived agent's timeline would load its session again; agents hibernated before capture existed are read once and archived again right away.
 
 ## UI
 
-- Sidebar: **Agent ngủ đông**, the dashboard with **Tiếp tục**, **Xem**, **Bỏ khỏi danh sách** and **Quét ngay**.
+- Sidebar: **Agent ngủ đông**, the dashboard with **Tiếp tục**, **Lịch sử**, **Bỏ khỏi danh sách** and **Quét ngay**.
 - Settings → Plugins → **Ngủ đông agent**: periodic scan switch and idle threshold in hours.
 - Command Center (⌘K) on an agent: **Cho agent này ngủ đông** to archive it now.
 
-The plugin's list of hibernated agents is stored in `$PASEO_HOME/plugin-data/agent-hibernate/hibernated.json` (default `~/.paseo`).
+The plugin's list of hibernated agents is stored in `$PASEO_HOME/plugin-data/agent-hibernate/hibernated.json` (default `~/.paseo`), captured histories next to it in `history/`.
 
 ## Install
 
