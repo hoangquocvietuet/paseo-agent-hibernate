@@ -1,8 +1,30 @@
-import type { PaseoAgent, PaseoAgentListOptions, PaseoApi } from "@getpaseo/client";
-import type { PluginSettings } from "@getpaseo/plugin/server";
+import type { PluginHandlerContext, PluginSettings } from "@getpaseo/plugin/server";
 import type { HibernatedAgent } from "../shared/rpc";
 import { hibernateSettings } from "../shared/settings";
 import type { HibernationRegistry } from "./registry";
+
+type PaseoApi = PluginHandlerContext["paseo"];
+
+/**
+ * The agent snapshot fields this plugin reads. Declared here because the plugin server runtime
+ * only resolves `@getpaseo/plugin` and `zod`, so `@getpaseo/client` types cannot be imported.
+ */
+interface PaseoAgent {
+  id: string;
+  title: string | null;
+  cwd: string;
+  provider: string;
+  model: string | null;
+  workspaceId?: string;
+  status: "initializing" | "idle" | "running" | "error" | "closed";
+  updatedAt: string;
+  archivedAt?: string | null;
+  activeTurn?: unknown;
+  pendingPermissions: readonly unknown[];
+  labels: Record<string, string>;
+}
+
+type AgentDirectoryFilter = { labels?: Record<string, string>; includeArchived?: boolean };
 
 type HibernateConfig = { enabled: boolean; idleHours: number };
 
@@ -229,7 +251,7 @@ function isBusy(agent: PaseoAgent): boolean {
 /** Every page of the agent directory for one filter. Active agents unless the filter says otherwise. */
 async function listAgents(
   api: PaseoApi,
-  filter: PaseoAgentListOptions["filter"],
+  filter: AgentDirectoryFilter,
 ): Promise<PaseoAgent[]> {
   const agents: PaseoAgent[] = [];
   let cursor: string | undefined;
