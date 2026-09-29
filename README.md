@@ -9,8 +9,8 @@ Every 10 minutes the plugin archives main agents whose whole family (the agent a
 - Only agents with a live session (`idle` or `error`) are considered. The daemon stores agents as `closed` on shutdown and loads them lazily, so unloaded agents are left alone.
 - Sub-agents (agents carrying the `paseo.parent-agent-id` label) are never archived by the plugin. When the plugin archives a main agent, the daemon archives its sub-agents too (or detaches those with an open tab or in another workspace). A sub-agent reopens when its main agent prompts it.
 - A family is skipped while any member is running, has an active turn, or waits for a permission.
-- The most recent activity of any family member counts: turns, and opening an agent (including to read its history).
-- For the first `idleHours` after the plugin starts, the periodic scan does nothing, because activity from before the start is unknown. **Quét ngay** in the dashboard is not affected.
+- Idleness is measured from the newest conversation item (user message, assistant message, reasoning, tool call) in each family member's timeline. `updatedAt` is not used on its own: it also moves on title, label and mode changes and when a provider session reloads (for example `omp` emits `notification` and `todo` rows on load).
+- Opening an agent to read it does not count as activity.
 
 ## UI
 

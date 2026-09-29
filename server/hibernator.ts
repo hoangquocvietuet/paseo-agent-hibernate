@@ -17,7 +17,9 @@ interface PaseoAgent {
   model: string | null;
   workspaceId?: string;
   status: "initializing" | "idle" | "running" | "error" | "closed";
+  createdAt: string;
   updatedAt: string;
+  lastUserMessageAt: string | null;
   archivedAt?: string | null;
   activeTurn?: unknown;
   pendingPermissions: readonly unknown[];
@@ -40,14 +42,17 @@ const RESIDENT_STATUSES = ["idle", "error"] as const;
  * `create_agent` carry it; archiving the parent makes the daemon archive (or detach) them too.
  */
 const PARENT_AGENT_ID_LABEL = "paseo.parent-agent-id";
+/**
+ * Timeline items that mean the agent or its user did something. Session reloads emit
+ * `notification` and replayed `todo` rows, which must not count as activity.
+ */
+const CONVERSATION_ITEM_TYPES = new Set(["user_message", "assistant_message", "reasoning", "tool_call"]);
+const TIMELINE_TAIL_LIMIT = 50;
 
 export class Hibernator {
   private api: PaseoApi | null = null;
   private lastScanAt: string | null = null;
   private scanning: Promise<string[]> | null = null;
-  /** Last session open or turn per agent, observed through lifecycle hooks. */
-  private readonly touchedAtMs = new Map<string, number>();
-  private readonly startedAtMs = Date.now();
 
   constructor(
     private readonly settings: PluginSettings<typeof hibernateSettings.schema>,
@@ -62,22 +67,17 @@ export class Hibernator {
     this.api ??= api;
   }
 
-  touch(agentId: string): void {
-    this.touchedAtMs.set(agentId, Date.now());
-  }
-
-  /** Periodic entry point: honors the enabled switch and the plugin-start grace period. */
+  /** Periodic entry point: honors the enabled switch. */
   async scanIfEnabled(): Promise<string[]> {
     if (!this.api) return [];
     const config = await this.readConfig();
     if (!config.enabled) return [];
-    return this.scan(this.api, { graceSinceStart: true });
+    return this.scan(this.api);
   }
 
-  /** Manual scans skip the start grace: the user asked for it now. */
-  scan(api: PaseoApi, options: { graceSinceStart: boolean } = { graceSinceStart: false }) {
+  scan(api: PaseoApi): Promise<string[]> {
     this.attach(api);
-    this.scanning ??= this.runScan(api, options.graceSinceStart).finally(() => {
+    this.scanning ??= this.runScan(api).finally(() => {
       this.scanning = null;
     });
     return this.scanning;
@@ -108,7 +108,7 @@ export class Hibernator {
     if ([agent, ...descendants].some(isBusy)) {
       throw new Error("Agent hoặc sub-agent của nó đang chạy hay chờ duyệt quyền.");
     }
-    return this.archive(api, agent, "manual");
+    return this.archive(api, agent, await lastActivityMs(api, agent), "manual");
   }
 
   async resume(api: PaseoApi, agentId: string, prompt: string): Promise<void> {
@@ -116,15 +116,13 @@ export class Hibernator {
     // The daemon unarchives and resumes an archived agent when it receives a prompt. Its
     // sub-agents stay archived until it prompts them, which unarchives them the same way.
     await api.agents.ref(agentId).send(prompt);
-    this.touch(agentId);
     await this.registry.remove([agentId]);
   }
 
-  private async runScan(api: PaseoApi, graceSinceStart: boolean): Promise<string[]> {
+  private async runScan(api: PaseoApi): Promise<string[]> {
     const config = await this.readConfig();
     const cutoffMs = Date.now() - config.idleHours * HOUR_MS;
     this.lastScanAt = new Date().toISOString();
-    if (graceSinceStart && this.startedAtMs > cutoffMs) return [];
 
     // Collect before archiving: archiving removes rows from the paginated active listing.
     const agents = await listAgents(api, {});
@@ -140,7 +138,8 @@ export class Hibernator {
         agent.id,
         async (parentId) => childrenByParent.get(parentId) ?? [],
       );
-      if (this.isFamilyHibernatable(agent, descendants, cutoffMs)) candidates.push(agent);
+      const idleSinceMs = await familyIdleSinceMs(api, agent, descendants, cutoffMs);
+      if (idleSinceMs !== null && idleSinceMs <= cutoffMs) candidates.push(agent);
     }
 
     const hibernated: string[] = [];
@@ -149,10 +148,10 @@ export class Hibernator {
         // Archiving cancels active runs in the whole family, so re-check right before acting.
         const fresh = await fetchAgent(api, candidate.id);
         if (!fresh || parentAgentId(fresh)) continue;
-        if (!this.isFamilyHibernatable(fresh, await listDescendants(api, fresh.id), cutoffMs)) {
-          continue;
-        }
-        await this.archive(api, fresh, "idle");
+        const descendants = await listDescendants(api, fresh.id);
+        const idleSinceMs = await familyIdleSinceMs(api, fresh, descendants, cutoffMs);
+        if (idleSinceMs === null || idleSinceMs > cutoffMs) continue;
+        await this.archive(api, fresh, idleSinceMs, "idle");
         hibernated.push(fresh.id);
       } catch (error) {
         console.error(`Failed to hibernate agent ${candidate.id}`, error);
@@ -162,35 +161,14 @@ export class Hibernator {
     return hibernated;
   }
 
-  /**
-   * A main agent and its sub-agents idle together: any busy member blocks the family, and the
-   * most recent activity of any member counts as the family's activity.
-   */
-  private isFamilyHibernatable(
-    root: PaseoAgent,
-    descendants: readonly PaseoAgent[],
-    cutoffMs: number,
-  ): boolean {
-    if (root.archivedAt) return false;
-    if (!(RESIDENT_STATUSES as readonly string[]).includes(root.status)) return false;
-    const family = [root, ...descendants];
-    if (family.some(isBusy)) return false;
-    const lastTouchMs = Math.max(
-      ...family.map((agent) =>
-        Math.max(Date.parse(agent.updatedAt), this.touchedAtMs.get(agent.id) ?? 0),
-      ),
-    );
-    return lastTouchMs <= cutoffMs;
-  }
-
   private async archive(
     api: PaseoApi,
     agent: PaseoAgent,
+    lastActivity: number,
     reason: HibernatedAgent["reason"],
   ): Promise<HibernatedAgent> {
     // The daemon cascades this to sub-agents; the plugin never archives them itself.
     await api.agents.ref(agent.id).archive();
-    this.touchedAtMs.delete(agent.id);
     const children = await listAgents(api, {
       labels: { [PARENT_AGENT_ID_LABEL]: agent.id },
       includeArchived: true,
@@ -202,7 +180,7 @@ export class Hibernator {
       provider: agent.provider,
       model: agent.model,
       workspaceId: agent.workspaceId ?? null,
-      lastActivityAt: agent.updatedAt,
+      lastActivityAt: new Date(lastActivity).toISOString(),
       hibernatedAt: new Date().toISOString(),
       reason,
       subagentCount: children.filter((child) => child.archivedAt).length,
@@ -246,6 +224,50 @@ function isBusy(agent: PaseoAgent): boolean {
     !!agent.activeTurn ||
     agent.pendingPermissions.length > 0
   );
+}
+
+/**
+ * When a main agent and its sub-agents last did anything, or `null` when the family cannot be
+ * hibernated now (root not holding a session, or any member busy). Members whose `updatedAt` is
+ * already past the cutoff skip the timeline read.
+ */
+async function familyIdleSinceMs(
+  api: PaseoApi,
+  root: PaseoAgent,
+  descendants: readonly PaseoAgent[],
+  cutoffMs: number,
+): Promise<number | null> {
+  if (root.archivedAt) return null;
+  if (!(RESIDENT_STATUSES as readonly string[]).includes(root.status)) return null;
+  const family = [root, ...descendants];
+  if (family.some(isBusy)) return null;
+  const activity = await Promise.all(
+    family.map((agent) =>
+      Date.parse(agent.updatedAt) <= cutoffMs ? Date.parse(agent.updatedAt) : lastActivityMs(api, agent),
+    ),
+  );
+  return Math.max(...activity);
+}
+
+/**
+ * Last conversation activity. `updatedAt` also moves on title, label and mode changes and when a
+ * provider session reloads, so it only bounds activity from above. Unloaded agents keep that
+ * bound: reading their timeline would load them.
+ */
+async function lastActivityMs(api: PaseoApi, agent: PaseoAgent): Promise<number> {
+  if (!(RESIDENT_STATUSES as readonly string[]).includes(agent.status)) {
+    return Date.parse(agent.updatedAt);
+  }
+  const tail = await api.agents
+    .ref(agent.id)
+    .timeline.refetch({ direction: "tail", limit: TIMELINE_TAIL_LIMIT });
+  let latest = Date.parse(agent.lastUserMessageAt ?? agent.createdAt);
+  for (const entry of tail.entries) {
+    if (CONVERSATION_ITEM_TYPES.has(entry.item.type)) {
+      latest = Math.max(latest, Date.parse(entry.timestamp));
+    }
+  }
+  return latest;
 }
 
 /** Every page of the agent directory for one filter. Active agents unless the filter says otherwise. */
