@@ -22,7 +22,7 @@ The plugin's list of hibernated agents is stored in `$PASEO_HOME/plugin-data/age
 
 ## Install
 
-Requires Paseo 0.10.1 or newer and **Settings → Plugins → Enable plugins** on the target daemon.
+Requires Paseo 0.9.2 or newer, on both the daemon and every app that should show the plugin, and **Settings → Plugins → Enable plugins** on the target daemon.
 
 ```bash
 git clone https://github.com/hoangquocvietuet/paseo-agent-hibernate.git
