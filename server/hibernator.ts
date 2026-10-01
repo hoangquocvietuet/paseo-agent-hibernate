@@ -3,7 +3,7 @@ import type { AgentHistory, HibernatedAgent } from "../shared/rpc";
 import { hibernateSettings } from "../shared/settings";
 import { captureHistory } from "./history";
 import type { HibernationRegistry } from "./registry";
-import { archiveWorkspaceIfUnused, listActiveWorkspaces } from "./workspaces";
+import { archiveWorkspaceIfUnused, listActiveWorkspaces, reopenWorkspace } from "./workspaces";
 
 type PaseoApi = PluginHandlerContext["paseo"];
 
@@ -53,13 +53,15 @@ const TIMELINE_TAIL_LIMIT = 50;
 
 export type ResumeResult =
   | { status: "resumed"; agentId: string }
-  | { status: "restore_workspace"; agentId: string; workspaceId: string };
+  | { status: "restore_workspace"; agentId: string; workspaceId: string; error: string };
 
 export class Hibernator {
   private api: PaseoApi | null = null;
   private lastScanAt: string | null = null;
   private scanning: Promise<string[]> | null = null;
   private resumingPending = false;
+  /** Held prompts whose workspace this process already tried to reopen. */
+  private readonly reopenAttempted = new Set<string>();
 
   constructor(
     private readonly settings: PluginSettings<typeof hibernateSettings.schema>,
@@ -132,8 +134,8 @@ export class Hibernator {
 
   /**
    * The daemon unarchives and resumes an archived agent when it receives a prompt, but leaves
-   * its workspace archived. The plugin API cannot restore a workspace (only the app's recovery
-   * view can), so the prompt waits until the user restores it there; `resumePending` sends it.
+   * its workspace archived, so the plugin reopens the workspace first. When that fails the prompt
+   * waits until the user restores the workspace in the app; `resumePending` sends it then.
    * Sub-agents stay archived until the main agent prompts them, which unarchives them too.
    */
   async resume(api: PaseoApi, agentId: string, prompt: string): Promise<ResumeResult> {
@@ -144,8 +146,11 @@ export class Hibernator {
     if (workspaceId) {
       const workspaces = await listActiveWorkspaces(api);
       if (!workspaces.some((workspace) => workspace.id === workspaceId)) {
-        await this.registry.update(agentId, { pendingPrompt: prompt });
-        return { status: "restore_workspace", agentId, workspaceId };
+        const error = await this.reopen(api, agentId, workspaceId, agent.cwd);
+        if (error) {
+          await this.registry.update(agentId, { pendingPrompt: prompt });
+          return { status: "restore_workspace", agentId, workspaceId, error };
+        }
       }
     }
     await api.agents.ref(agentId).send(prompt);
@@ -157,7 +162,10 @@ export class Hibernator {
     return this.registry.update(agentId, { pendingPrompt: null });
   }
 
-  /** Sends held prompts once their workspace is active again. Cheap when nothing is pending. */
+  /**
+   * Sends held prompts once their workspace is active again. Each held prompt also gets one
+   * reopening attempt per plugin process, which covers prompts held by earlier versions.
+   */
   async resumePending(): Promise<void> {
     const api = this.api;
     if (!api || this.resumingPending) return;
@@ -167,8 +175,12 @@ export class Hibernator {
     try {
       const activeWorkspaceIds = new Set((await listActiveWorkspaces(api)).map((w) => w.id));
       for (const entry of pending) {
-        if (!entry.pendingPrompt || !entry.workspaceId || !activeWorkspaceIds.has(entry.workspaceId)) {
-          continue;
+        if (!entry.pendingPrompt || !entry.workspaceId) continue;
+        if (!activeWorkspaceIds.has(entry.workspaceId)) {
+          if (this.reopenAttempted.has(entry.agentId)) continue;
+          this.reopenAttempted.add(entry.agentId);
+          if (await this.reopen(api, entry.agentId, entry.workspaceId, entry.cwd)) continue;
+          activeWorkspaceIds.add(entry.workspaceId);
         }
         try {
           await api.agents.ref(entry.agentId).send(entry.pendingPrompt);
@@ -180,6 +192,29 @@ export class Hibernator {
       }
     } finally {
       this.resumingPending = false;
+    }
+  }
+
+  /**
+   * Reopens an archived workspace from what the plugin recorded when archiving it; workspaces
+   * archived before that was recorded (or by someone else) reopen at the agent's directory.
+   * Returns why it failed, or `null` once the workspace is active.
+   */
+  private async reopen(
+    api: PaseoApi,
+    agentId: string,
+    workspaceId: string,
+    agentCwd: string,
+  ): Promise<string | null> {
+    const entry = await this.registry.get(agentId);
+    const restore = entry?.workspaceRestore ?? { directory: agentCwd, worktree: null };
+    try {
+      await reopenWorkspace(api, workspaceId, restore);
+      console.log(`Reopened workspace ${workspaceId} for ${agentId}`);
+      return null;
+    } catch (error) {
+      console.error(`Failed to reopen workspace ${workspaceId} for ${agentId}`, error);
+      return error instanceof Error ? error.message : String(error);
     }
   }
 
@@ -274,6 +309,7 @@ export class Hibernator {
       workspaceId: agent.workspaceId ?? null,
       workspaceName: workspace?.name ?? null,
       workspaceArchivedByPlugin: false,
+      workspaceRestore: null,
       lastActivityAt: new Date(lastActivity).toISOString(),
       hibernatedAt: new Date().toISOString(),
       reason,
@@ -301,13 +337,14 @@ export class Hibernator {
       const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
       if (!workspace) continue;
       try {
-        const keptBecause = await archiveWorkspaceIfUnused(api, workspace, occupiedWorkspaceIds);
-        if (keptBecause) continue;
+        const outcome = await archiveWorkspaceIfUnused(api, workspace, occupiedWorkspaceIds);
+        if ("keptBecause" in outcome) continue;
         console.log(`Archived unused workspace ${workspace.name} (${workspace.id})`);
         for (const entry of entries.filter((candidate) => candidate.workspaceId === workspaceId)) {
           await this.registry.update(entry.agentId, {
             workspaceArchivedByPlugin: true,
             workspaceName: workspace.name,
+            workspaceRestore: outcome.restore,
           });
         }
       } catch (error) {

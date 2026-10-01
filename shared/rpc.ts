@@ -1,6 +1,14 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
+/** What reopening a workspace the plugin archived needs. */
+export const WorkspaceRestoreSchema = z.object({
+  directory: z.string(),
+  /** Paseo-owned worktrees lose their directory on archive; git recreates it from the branch. */
+  worktree: z.object({ branch: z.string(), repoRoot: z.string() }).nullable(),
+});
+export type WorkspaceRestore = z.infer<typeof WorkspaceRestoreSchema>;
+
 export const HibernatedAgentSchema = z.object({
   agentId: z.string(),
   title: z.string().nullable(),
@@ -11,13 +19,15 @@ export const HibernatedAgentSchema = z.object({
   workspaceName: z.string().nullable().default(null),
   /** The plugin archived the workspace because nothing else used it. */
   workspaceArchivedByPlugin: z.boolean().default(false),
+  /** Recorded when the plugin archives the workspace, so resuming can reopen it. */
+  workspaceRestore: WorkspaceRestoreSchema.nullable().default(null),
   /** Last conversation activity when the agent was archived. */
   lastActivityAt: z.string(),
   hibernatedAt: z.string(),
   reason: z.enum(["idle", "manual"]),
   /** Direct sub-agents the daemon archived together with this agent. */
   subagentCount: z.number().int().nonnegative().default(0),
-  /** Prompt held until the user restores the archived workspace. */
+  /** Prompt held until the user restores the archived workspace (automatic reopening failed). */
   pendingPrompt: z.string().nullable().default(null),
 });
 export type HibernatedAgent = z.infer<typeof HibernatedAgentSchema>;
@@ -71,8 +81,13 @@ export const resumeRpc = defineRpc({
   input: z.object({ agentId: z.string().min(1), prompt: z.string().trim().min(1) }),
   output: z.discriminatedUnion("status", [
     z.object({ status: z.literal("resumed"), agentId: z.string() }),
-    /** The prompt waits until the workspace is restored in the app. */
-    z.object({ status: z.literal("restore_workspace"), agentId: z.string(), workspaceId: z.string() }),
+    /** The workspace could not be reopened automatically; the prompt waits for the app's restore. */
+    z.object({
+      status: z.literal("restore_workspace"),
+      agentId: z.string(),
+      workspaceId: z.string(),
+      error: z.string(),
+    }),
   ]),
 });
 

@@ -192,10 +192,10 @@ function HibernatedRow({
       if (result.status === "resumed") {
         navigation?.openAgent();
       } else {
-        toast.show("Press Unarchive or Restore to reopen the workspace; the agent continues there.", {
-          variant: "info",
-          durationMs: 8000,
-        });
+        toast.show(
+          `Could not reopen the workspace (${result.error}). Press Unarchive or Restore; the agent continues there.`,
+          { variant: "info", durationMs: 10000 },
+        );
         navigation?.openWorkspace(result.workspaceId);
       }
       return invalidate();
@@ -246,8 +246,8 @@ function HibernatedRow({
       {entry.pendingPrompt !== null ? (
         <View style={{ gap: 8, marginTop: 4 }}>
           <Text style={styles.warning}>
-            Waiting for the workspace to reopen. Press Unarchive or Restore on the workspace screen
-            and the agent receives “{entry.pendingPrompt}”.
+            Could not reopen the workspace automatically. Press Unarchive or Restore on the
+            workspace screen and the agent receives “{entry.pendingPrompt}”.
           </Text>
           <View style={styles.actions}>
             {navigation && entry.workspaceId ? (
@@ -273,7 +273,7 @@ function HibernatedRow({
         <View style={{ gap: 8, marginTop: 4 }}>
           {!entry.workspaceActive ? (
             <Text style={styles.muted}>
-              The workspace is closed: after sending, press Unarchive or Restore to reopen it.
+              The workspace is archived; it reopens when you send.
             </Text>
           ) : null}
           <TextInput
