@@ -3,7 +3,8 @@ import type { AgentHistory, HibernatedAgent } from "../shared/rpc";
 import { hibernateSettings } from "../shared/settings";
 import { captureHistory } from "./history";
 import type { HibernationRegistry } from "./registry";
-import { archiveWorkspaceIfUnused, listActiveWorkspaces, reopenWorkspace } from "./workspaces";
+import { restoreWorkspace } from "./recovery";
+import { archiveWorkspaceIfUnused, listActiveWorkspaces } from "./workspaces";
 
 type PaseoApi = PluginHandlerContext["paseo"];
 
@@ -146,7 +147,7 @@ export class Hibernator {
     if (workspaceId) {
       const workspaces = await listActiveWorkspaces(api);
       if (!workspaces.some((workspace) => workspace.id === workspaceId)) {
-        const error = await this.reopen(api, agentId, workspaceId, agent.cwd);
+        const error = await this.reopen(agentId, workspaceId);
         if (error) {
           await this.registry.update(agentId, { pendingPrompt: prompt });
           return { status: "restore_workspace", agentId, workspaceId, error };
@@ -164,7 +165,7 @@ export class Hibernator {
 
   /**
    * Sends held prompts once their workspace is active again. Each held prompt also gets one
-   * reopening attempt per plugin process, which covers prompts held by earlier versions.
+   * restore attempt per plugin process, which covers prompts held by earlier versions.
    */
   async resumePending(): Promise<void> {
     const api = this.api;
@@ -179,7 +180,7 @@ export class Hibernator {
         if (!activeWorkspaceIds.has(entry.workspaceId)) {
           if (this.reopenAttempted.has(entry.agentId)) continue;
           this.reopenAttempted.add(entry.agentId);
-          if (await this.reopen(api, entry.agentId, entry.workspaceId, entry.cwd)) continue;
+          if (await this.reopen(entry.agentId, entry.workspaceId)) continue;
           activeWorkspaceIds.add(entry.workspaceId);
         }
         try {
@@ -195,25 +196,14 @@ export class Hibernator {
     }
   }
 
-  /**
-   * Reopens an archived workspace from what the plugin recorded when archiving it; workspaces
-   * archived before that was recorded (or by someone else) reopen at the agent's directory.
-   * Returns why it failed, or `null` once the workspace is active.
-   */
-  private async reopen(
-    api: PaseoApi,
-    agentId: string,
-    workspaceId: string,
-    agentCwd: string,
-  ): Promise<string | null> {
-    const entry = await this.registry.get(agentId);
-    const restore = entry?.workspaceRestore ?? { directory: agentCwd, worktree: null };
+  /** Restores the archived workspace like the app does. Returns why it failed, or `null`. */
+  private async reopen(agentId: string, workspaceId: string): Promise<string | null> {
     try {
-      await reopenWorkspace(api, workspaceId, restore);
-      console.log(`Reopened workspace ${workspaceId} for ${agentId}`);
+      await restoreWorkspace(workspaceId);
+      console.log(`Restored workspace ${workspaceId} for ${agentId}`);
       return null;
     } catch (error) {
-      console.error(`Failed to reopen workspace ${workspaceId} for ${agentId}`, error);
+      console.error(`Failed to restore workspace ${workspaceId} for ${agentId}`, error);
       return error instanceof Error ? error.message : String(error);
     }
   }
@@ -309,7 +299,6 @@ export class Hibernator {
       workspaceId: agent.workspaceId ?? null,
       workspaceName: workspace?.name ?? null,
       workspaceArchivedByPlugin: false,
-      workspaceRestore: null,
       lastActivityAt: new Date(lastActivity).toISOString(),
       hibernatedAt: new Date().toISOString(),
       reason,
@@ -337,14 +326,13 @@ export class Hibernator {
       const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
       if (!workspace) continue;
       try {
-        const outcome = await archiveWorkspaceIfUnused(api, workspace, occupiedWorkspaceIds);
-        if ("keptBecause" in outcome) continue;
+        const keptBecause = await archiveWorkspaceIfUnused(api, workspace, occupiedWorkspaceIds);
+        if (keptBecause) continue;
         console.log(`Archived unused workspace ${workspace.name} (${workspace.id})`);
         for (const entry of entries.filter((candidate) => candidate.workspaceId === workspaceId)) {
           await this.registry.update(entry.agentId, {
             workspaceArchivedByPlugin: true,
             workspaceName: workspace.name,
-            workspaceRestore: outcome.restore,
           });
         }
       } catch (error) {

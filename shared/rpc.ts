@@ -1,14 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
-/** What reopening a workspace the plugin archived needs. */
-export const WorkspaceRestoreSchema = z.object({
-  directory: z.string(),
-  /** Paseo-owned worktrees lose their directory on archive; git recreates it from the branch. */
-  worktree: z.object({ branch: z.string(), repoRoot: z.string() }).nullable(),
-});
-export type WorkspaceRestore = z.infer<typeof WorkspaceRestoreSchema>;
-
 export const HibernatedAgentSchema = z.object({
   agentId: z.string(),
   title: z.string().nullable(),
@@ -19,8 +11,6 @@ export const HibernatedAgentSchema = z.object({
   workspaceName: z.string().nullable().default(null),
   /** The plugin archived the workspace because nothing else used it. */
   workspaceArchivedByPlugin: z.boolean().default(false),
-  /** Recorded when the plugin archives the workspace, so resuming can reopen it. */
-  workspaceRestore: WorkspaceRestoreSchema.nullable().default(null),
   /** Last conversation activity when the agent was archived. */
   lastActivityAt: z.string(),
   hibernatedAt: z.string(),

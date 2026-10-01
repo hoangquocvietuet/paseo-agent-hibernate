@@ -14,9 +14,12 @@ const RegistryFileSchema = z.object({
   entries: z.array(HibernatedAgentSchema),
 });
 
+export function paseoHome(): string {
+  return process.env.PASEO_HOME ?? join(homedir(), ".paseo");
+}
+
 export function defaultRegistryPath(): string {
-  const paseoHome = process.env.PASEO_HOME ?? join(homedir(), ".paseo");
-  return join(paseoHome, "plugin-data", "agent-hibernate", "hibernated.json");
+  return join(paseoHome(), "plugin-data", "agent-hibernate", "hibernated.json");
 }
 
 /**
